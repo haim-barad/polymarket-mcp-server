@@ -234,13 +234,15 @@ class PolymarketClient:
         try:
             ob = self.client.get_order_book(token_id)
 
-            # py-clob-client returns an OrderBookSummary object whose bids/asks
-            # are objects with .price/.size. Callers expect plain dicts with
-            # best price at index 0, so convert and sort here.
+            # The CLOB returns bids/asks unsorted (and the V2 client returns a
+            # plain dict while V1 returned an object). Callers expect plain
+            # dicts with the best price at index 0, so normalize and sort here.
+            def _field(obj, key):
+                return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
             def _levels(side, best_first_desc):
                 rows = [
-                    {"price": getattr(lvl, "price", None),
-                     "size": getattr(lvl, "size", None)}
+                    {"price": _field(lvl, "price"), "size": _field(lvl, "size")}
                     for lvl in (side or [])
                 ]
                 rows.sort(key=lambda r: float(r["price"] or 0),
@@ -248,11 +250,11 @@ class PolymarketClient:
                 return rows
 
             return {
-                "bids": _levels(ob.bids, True),    # highest (best) bid first
-                "asks": _levels(ob.asks, False),   # lowest (best) ask first
-                "asset_id": getattr(ob, "asset_id", token_id),
-                "market": getattr(ob, "market", None),
-                "timestamp": getattr(ob, "timestamp", None),
+                "bids": _levels(_field(ob, "bids"), True),    # highest (best) bid first
+                "asks": _levels(_field(ob, "asks"), False),   # lowest (best) ask first
+                "asset_id": _field(ob, "asset_id") or token_id,
+                "market": _field(ob, "market"),
+                "timestamp": _field(ob, "timestamp"),
             }
 
         except Exception as e:
