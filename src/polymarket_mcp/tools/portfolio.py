@@ -49,6 +49,34 @@ class PortfolioDataCache:
 _portfolio_cache = PortfolioDataCache()
 
 
+def _normalize_positions(raw: Any) -> List[Dict[str, Any]]:
+    """
+    Normalize Polymarket Data API position records to the field names used
+    throughout this module.
+
+    The Data API returns keys like `asset`, `avgPrice`, `curPrice`,
+    `conditionId`, and `title`; the portfolio tools read `asset_id`,
+    `average_price`, `current_price`, `market`, and `market_question`. This
+    bridges the two while preserving the original fields.
+    """
+    if not isinstance(raw, list):
+        return raw
+    normalized: List[Dict[str, Any]] = []
+    for p in raw:
+        if not isinstance(p, dict):
+            continue
+        normalized.append({
+            **p,
+            "asset_id": p.get("asset_id", p.get("asset", "")),
+            "market": p.get("market") or p.get("conditionId", ""),
+            "market_question": p.get("market_question", p.get("title", "Unknown")),
+            "average_price": float(p.get("average_price", p.get("avgPrice", 0)) or 0),
+            "current_price": float(p.get("current_price", p.get("curPrice", 0)) or 0),
+            "size": float(p.get("size", 0) or 0),
+        })
+    return normalized
+
+
 async def get_all_positions(
     polymarket_client,
     rate_limiter,
@@ -96,7 +124,7 @@ async def get_all_positions(
                     timeout=10.0
                 )
                 response.raise_for_status()
-                positions_data = response.json()
+                positions_data = _normalize_positions(response.json())
 
                 # Cache the result
                 _portfolio_cache.set(cache_key, positions_data)
@@ -250,7 +278,7 @@ async def get_position_details(
                 timeout=10.0
             )
             response.raise_for_status()
-            positions = response.json()
+            positions = _normalize_positions(response.json())
 
         if not positions:
             return [types.TextContent(
@@ -428,7 +456,7 @@ async def get_portfolio_value(
                 timeout=10.0
             )
             response.raise_for_status()
-            positions = response.json()
+            positions = _normalize_positions(response.json())
 
         # Get open orders
         try:
@@ -593,7 +621,7 @@ async def get_pnl_summary(
                 timeout=10.0
             )
             response.raise_for_status()
-            positions = response.json()
+            positions = _normalize_positions(response.json())
 
         # Calculate realized P&L from trades
         # Group trades by market and outcome to match buys with sells
@@ -997,7 +1025,7 @@ async def analyze_portfolio_risk(
                 timeout=10.0
             )
             response.raise_for_status()
-            positions = response.json()
+            positions = _normalize_positions(response.json())
 
         if not positions:
             return [types.TextContent(
@@ -1235,7 +1263,7 @@ async def suggest_portfolio_actions(
                 timeout=10.0
             )
             response.raise_for_status()
-            positions = response.json()
+            positions = _normalize_positions(response.json())
 
         if not positions:
             return [types.TextContent(

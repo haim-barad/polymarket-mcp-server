@@ -231,8 +231,28 @@ class PolymarketClient:
             Order book with bids and asks
         """
         try:
-            orderbook = self.client.get_order_book(token_id)
-            return orderbook
+            ob = self.client.get_order_book(token_id)
+
+            # py-clob-client returns an OrderBookSummary object whose bids/asks
+            # are objects with .price/.size. Callers expect plain dicts with
+            # best price at index 0, so convert and sort here.
+            def _levels(side, best_first_desc):
+                rows = [
+                    {"price": getattr(lvl, "price", None),
+                     "size": getattr(lvl, "size", None)}
+                    for lvl in (side or [])
+                ]
+                rows.sort(key=lambda r: float(r["price"] or 0),
+                          reverse=best_first_desc)
+                return rows
+
+            return {
+                "bids": _levels(ob.bids, True),    # highest (best) bid first
+                "asks": _levels(ob.asks, False),   # lowest (best) ask first
+                "asset_id": getattr(ob, "asset_id", token_id),
+                "market": getattr(ob, "market", None),
+                "timestamp": getattr(ob, "timestamp", None),
+            }
 
         except Exception as e:
             logger.error(f"Failed to fetch orderbook for {token_id}: {e}")
