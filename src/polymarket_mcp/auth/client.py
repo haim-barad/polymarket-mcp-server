@@ -5,15 +5,15 @@ Handles L1 (private key) and L2 (API key) authentication.
 from typing import Dict, Any, List, Optional
 import logging
 import httpx
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import (
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import (
     ApiCreds,
-    OrderArgs,
+    OrderArgs,  # aliased to OrderArgsV2 in the V2 client
     OrderType,
     BalanceAllowanceParams,
     AssetType,
 )
-from py_clob_client.constants import POLYGON
+from py_clob_client_v2.constants import POLYGON
 
 from .signer import OrderSigner
 
@@ -156,7 +156,8 @@ class PolymarketClient:
             # create_or_derive: creates a new L2 key if none exists, otherwise
             # deterministically derives the existing one. Plain create_api_key()
             # returns HTTP 400 when the account already has a key.
-            creds = self.client.create_or_derive_api_creds()
+            # (V2 client renamed this from create_or_derive_api_creds.)
+            creds = self.client.create_or_derive_api_key()
 
             # Store credentials
             self.api_creds = ApiCreds(

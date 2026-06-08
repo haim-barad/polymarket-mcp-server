@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0.0",
-    "py-clob-client>=0.28.0",
+    "py-clob-client-v2>=1.0.1",  # CLOB V2 (Polymarket migrated Apr 2026); V1 client rejected orders with "invalid order version"
     "websockets>=12.0",
     "eth-account>=0.11.0",
     "python-dotenv>=1.0.0",
