@@ -314,20 +314,25 @@ class PolymarketClient:
             )
 
         try:
-            # Build order args
+            # Build order args. OrderArgs does NOT take order_type; the type is
+            # supplied to post_order below.
             order_args = OrderArgs(
                 token_id=token_id,
                 price=price,
                 size=size,
                 side=side.upper(),
-                order_type=order_type,
             )
 
             if expiration:
                 order_args.expiration = expiration
 
-            # Post order using client
-            order_response = self.client.create_order(order_args)
+            # create_order only builds & signs the order locally; post_order
+            # actually submits it to the CLOB. Both steps are required.
+            signed_order = self.client.create_order(order_args)
+            order_type_enum = getattr(
+                OrderType, str(order_type).upper(), OrderType.GTC
+            )
+            order_response = self.client.post_order(signed_order, order_type_enum)
 
             logger.info(
                 f"Order posted: {side} {size} @ {price} "
