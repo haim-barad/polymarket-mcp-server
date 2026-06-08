@@ -33,6 +33,8 @@ class PolymarketClient:
         api_secret: Optional[str] = None,
         passphrase: Optional[str] = None,
         host: str = "https://clob.polymarket.com",
+        signature_type: int = 0,
+        funder: Optional[str] = None,
     ):
         """
         Initialize Polymarket client.
@@ -45,11 +47,17 @@ class PolymarketClient:
             api_secret: Optional L2 API secret (same as passphrase)
             passphrase: Optional L2 API passphrase
             host: CLOB API host URL
+            signature_type: 0=EOA, 1=email/Magic proxy, 2=browser proxy
+            funder: Address holding funds (required for proxy signature types)
         """
         self.private_key = private_key
         self.address = address.lower()
         self.chain_id = chain_id
         self.host = host
+        self.signature_type = signature_type
+        # Address that actually holds funds; for proxy accounts this differs
+        # from the signing key's address. Falls back to the signer address.
+        self.funder = funder.lower() if funder else self.address
 
         # Initialize order signer
         self.signer = OrderSigner(private_key, chain_id)
@@ -82,6 +90,12 @@ class PolymarketClient:
                 "chain_id": self.chain_id,
                 "key": self.private_key,
             }
+
+            # Proxy wallets (email/Magic or browser proxy) sign with the key but
+            # trade on behalf of a separate funded address.
+            if self.signature_type != 0:
+                client_args["signature_type"] = self.signature_type
+                client_args["funder"] = self.funder
 
             # Add L2 credentials if available
             if self.api_creds:
@@ -393,7 +407,7 @@ class PolymarketClient:
             raise RuntimeError("L2 API credentials required")
 
         try:
-            positions = self.client.get_positions(self.address)
+            positions = self.client.get_positions(self.funder)
             return positions
 
         except Exception as e:
@@ -414,7 +428,7 @@ class PolymarketClient:
             raise RuntimeError("L2 API credentials required")
 
         try:
-            balance_data = self.client.get_balance(self.address)
+            balance_data = self.client.get_balance(self.funder)
             return balance_data
 
         except Exception as e:
@@ -441,6 +455,8 @@ def create_polymarket_client(
     api_key: Optional[str] = None,
     api_secret: Optional[str] = None,
     passphrase: Optional[str] = None,
+    signature_type: int = 0,
+    funder: Optional[str] = None,
 ) -> PolymarketClient:
     """
     Create PolymarketClient instance.
@@ -452,6 +468,8 @@ def create_polymarket_client(
         api_key: Optional L2 API key
         api_secret: Optional L2 API secret
         passphrase: Optional L2 API passphrase
+        signature_type: 0=EOA, 1=email/Magic proxy, 2=browser proxy
+        funder: Address holding funds (required for proxy signature types)
 
     Returns:
         PolymarketClient instance
@@ -462,5 +480,7 @@ def create_polymarket_client(
         chain_id=chain_id,
         api_key=api_key,
         api_secret=api_secret,
-        passphrase=passphrase
+        passphrase=passphrase,
+        signature_type=signature_type,
+        funder=funder,
     )

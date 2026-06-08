@@ -3,9 +3,16 @@ Configuration management for Polymarket MCP server.
 Loads and validates environment variables with proper defaults.
 """
 import os
+from pathlib import Path
 from typing import Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Absolute path to the repo-root .env so the server finds its config no matter
+# which directory an MCP host (Claude Code, AionUI, Hermes, ...) launches it from.
+# config.py -> polymarket_mcp -> src -> <repo root>
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ENV_FILE = os.environ.get("POLYMARKET_ENV_FILE", str(_REPO_ROOT / ".env"))
 
 
 class PolymarketConfig(BaseSettings):
@@ -15,7 +22,7 @@ class PolymarketConfig(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore"
@@ -39,6 +46,22 @@ class PolymarketConfig(BaseSettings):
     POLYMARKET_CHAIN_ID: int = Field(
         default=137,
         description="Polygon chain ID (137 for mainnet, 80002 for Amoy testnet)"
+    )
+
+    # Signature type for order signing:
+    #   0 = EOA (MetaMask / external wallet that directly holds funds)
+    #   1 = Email/Magic embedded wallet (Polymarket proxy holds funds)
+    #   2 = Browser-wallet Polymarket proxy (Gnosis Safe)
+    POLYMARKET_SIGNATURE_TYPE: int = Field(
+        default=0,
+        description="Order signature type: 0=EOA, 1=email/Magic proxy, 2=browser proxy"
+    )
+    # Address that actually holds your funds. Required for signature_type 1 or 2.
+    # For email/Google logins this is your Polymarket deposit address (where
+    # Coinbase withdrawals land), which differs from the signing key's address.
+    POLYMARKET_FUNDER_ADDRESS: Optional[str] = Field(
+        default=None,
+        description="Funded proxy address (required for signature_type 1 or 2)"
     )
 
     # Optional L2 API Credentials (auto-created if not provided)
