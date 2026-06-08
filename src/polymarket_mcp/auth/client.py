@@ -4,13 +4,23 @@ Handles L1 (private key) and L2 (API key) authentication.
 """
 from typing import Dict, Any, List, Optional
 import logging
+import httpx
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+from py_clob_client.clob_types import (
+    ApiCreds,
+    OrderArgs,
+    OrderType,
+    BalanceAllowanceParams,
+    AssetType,
+)
 from py_clob_client.constants import POLYGON
 
 from .signer import OrderSigner
 
 logger = logging.getLogger(__name__)
+
+# Polymarket Data API (positions/holdings are not served by the CLOB client).
+DATA_API_URL = "https://data-api.polymarket.com"
 
 
 class PolymarketClient:
@@ -141,10 +151,12 @@ class PolymarketClient:
             Exception: If credential creation fails
         """
         try:
-            logger.info("Creating API credentials...")
+            logger.info("Creating/deriving API credentials...")
 
-            # Use the client's built-in method to create credentials
-            creds = self.client.create_api_key()
+            # create_or_derive: creates a new L2 key if none exists, otherwise
+            # deterministically derives the existing one. Plain create_api_key()
+            # returns HTTP 400 when the account already has a key.
+            creds = self.client.create_or_derive_api_creds()
 
             # Store credentials
             self.api_creds = ApiCreds(
@@ -395,19 +407,38 @@ class PolymarketClient:
 
     async def get_positions(self) -> List[Dict[str, Any]]:
         """
-        Get user's positions.
+        Get user's positions from the Polymarket Data API.
+
+        The CLOB client does not expose positions; they are served by the
+        public Data API keyed on the funded (proxy) address. Each position is
+        normalized to include the keys downstream code expects
+        (asset_id, market, size, avg_price, current_price, unrealized_pnl)
+        while preserving the original Data API fields.
 
         Returns:
-            List of positions
-
-        Raises:
-            RuntimeError: If L2 credentials not available
+            List of position dicts
         """
-        if not self.api_creds:
-            raise RuntimeError("L2 API credentials required")
-
         try:
-            positions = self.client.get_positions(self.funder)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{DATA_API_URL}/positions",
+                    params={"user": self.funder, "sizeThreshold": "0.1"},
+                    timeout=20.0,
+                )
+                response.raise_for_status()
+                raw_positions = response.json()
+
+            positions: List[Dict[str, Any]] = []
+            for p in raw_positions:
+                positions.append({
+                    **p,
+                    "asset_id": p.get("asset", ""),
+                    "market": p.get("conditionId", ""),
+                    "size": float(p.get("size", 0) or 0),
+                    "avg_price": float(p.get("avgPrice", 0) or 0),
+                    "current_price": float(p.get("curPrice", 0) or 0),
+                    "unrealized_pnl": float(p.get("cashPnl", 0) or 0),
+                })
             return positions
 
         except Exception as e:
@@ -416,10 +447,12 @@ class PolymarketClient:
 
     async def get_balance(self) -> Dict[str, float]:
         """
-        Get user's USDC balance.
+        Get user's USDC (collateral) balance via the CLOB balance-allowance
+        endpoint. Balance is returned by the API in USDC base units (6
+        decimals) and converted to dollars here.
 
         Returns:
-            Dictionary with balance info
+            Dict with 'balance' (USDC, dollars), 'raw' (base units), 'address'
 
         Raises:
             RuntimeError: If L2 credentials not available
@@ -428,8 +461,18 @@ class PolymarketClient:
             raise RuntimeError("L2 API credentials required")
 
         try:
-            balance_data = self.client.get_balance(self.funder)
-            return balance_data
+            result = self.client.get_balance_allowance(
+                BalanceAllowanceParams(
+                    asset_type=AssetType.COLLATERAL,
+                    signature_type=self.signature_type,
+                )
+            )
+            raw = int(result.get("balance", 0) or 0)
+            return {
+                "balance": raw / 1_000_000,
+                "raw": raw,
+                "address": self.funder,
+            }
 
         except Exception as e:
             logger.error(f"Failed to fetch balance: {e}")
