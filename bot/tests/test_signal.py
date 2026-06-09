@@ -1,10 +1,7 @@
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from signal_filter import evaluate_market
 
 
 def test_filter_rejects_out_of_band():
-    from signal_filter import evaluate_market
     m = {
         "question": "Will the Lakers win?",
         "best_ask": 0.20,
@@ -18,7 +15,6 @@ def test_filter_rejects_out_of_band():
 
 
 def test_filter_rejects_low_liquidity():
-    from signal_filter import evaluate_market
     m = {
         "question": "Lakers vs Celtics",
         "best_ask": 0.45,
@@ -32,7 +28,6 @@ def test_filter_rejects_low_liquidity():
 
 
 def test_filter_rejects_too_close_to_resolution():
-    from signal_filter import evaluate_market
     m = {
         "question": "Lakers vs Celtics",
         "best_ask": 0.45,
@@ -45,7 +40,6 @@ def test_filter_rejects_too_close_to_resolution():
 
 
 def test_filter_rejects_too_far_to_resolution():
-    from signal_filter import evaluate_market
     m = {
         "question": "Lakers vs Celtics",
         "best_ask": 0.45,
@@ -58,7 +52,6 @@ def test_filter_rejects_too_far_to_resolution():
 
 
 def test_filter_rejects_blacklist_keyword():
-    from signal_filter import evaluate_market
     m = {
         "question": "Esports tournament winner",
         "best_ask": 0.45,
@@ -72,7 +65,6 @@ def test_filter_rejects_blacklist_keyword():
 
 
 def test_filter_accepts_clean_market():
-    from signal_filter import evaluate_market
     m = {
         "question": "NFL: Will the Chiefs beat the Bills?",
         "best_ask": 0.50,

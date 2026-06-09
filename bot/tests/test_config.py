@@ -1,11 +1,7 @@
-import sys
-from pathlib import Path
+from config import BotConfig
 
-# Add bot dir to path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def test_config_loads_defaults():
-    from config import BotConfig
     cfg = BotConfig.load()
     assert cfg.per_trade_cap_usd == 5.0
     assert cfg.total_open_exposure_usd == 30.0

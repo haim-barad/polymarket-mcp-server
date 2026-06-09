@@ -1,13 +1,11 @@
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 import tempfile
+from pathlib import Path
+
+from killswitch import KillSwitch
+from state_manager import StateManager
 
 
 def test_killswitch_blocks_when_daily_loss_hit():
-    from killswitch import KillSwitch
-    from state_manager import StateManager
     with tempfile.TemporaryDirectory() as tmp:
         sd = Path(tmp)
         sm = StateManager(state_dir=sd)
@@ -19,8 +17,6 @@ def test_killswitch_blocks_when_daily_loss_hit():
 
 
 def test_killswitch_allows_normal_trade():
-    from killswitch import KillSwitch
-    from state_manager import StateManager
     with tempfile.TemporaryDirectory() as tmp:
         sd = Path(tmp)
         sm = StateManager(state_dir=sd)
@@ -33,8 +29,6 @@ def test_killswitch_allows_normal_trade():
 
 
 def test_killswitch_blocks_on_three_consecutive_failures():
-    from killswitch import KillSwitch
-    from state_manager import StateManager
     with tempfile.TemporaryDirectory() as tmp:
         sd = Path(tmp)
         sm = StateManager(state_dir=sd)
@@ -46,8 +40,6 @@ def test_killswitch_blocks_on_three_consecutive_failures():
 
 
 def test_killswitch_blocks_on_explicit_halt():
-    from killswitch import KillSwitch
-    from state_manager import StateManager
     with tempfile.TemporaryDirectory() as tmp:
         sd = Path(tmp)
         sm = StateManager(state_dir=sd)

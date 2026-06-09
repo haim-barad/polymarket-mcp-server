@@ -1,12 +1,10 @@
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 import tempfile
+
+from state_manager import StateManager
 
 
 def test_state_file_atomic_write_and_read():
-    from state_manager import StateManager
+    from pathlib import Path
     with tempfile.TemporaryDirectory() as tmp:
         sm = StateManager(state_dir=Path(tmp))
         sm.update(halted=False, today_realized_pnl_usd=0.0, today_trade_count=0)
@@ -17,7 +15,7 @@ def test_state_file_atomic_write_and_read():
 
 
 def test_state_file_recovers_from_corruption():
-    from state_manager import StateManager
+    from pathlib import Path
     with tempfile.TemporaryDirectory() as tmp:
         sd = Path(tmp)
         (sd / "state.json").write_text("{ corrupt json")
@@ -28,8 +26,7 @@ def test_state_file_recovers_from_corruption():
 
 
 def test_trades_today_filters_by_utc_date():
-    from state_manager import StateManager
-    from datetime import datetime, timezone
+    from pathlib import Path
     with tempfile.TemporaryDirectory() as tmp:
         sm = StateManager(state_dir=Path(tmp))
         sm.record_trade(
