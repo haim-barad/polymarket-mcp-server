@@ -15,6 +15,7 @@ from bot.killswitch import KillSwitch
 from bot.signal_filter import evaluate_market
 from bot.notifier import Notifier
 import bot.mcp_client as mcp_client
+import bot.onchain_reconcile as onchain_reconcile
 
 
 # Off-topic content filter: markets that the MCP "sports" tag includes
@@ -165,6 +166,24 @@ class BotRunner:
     async def tick(self) -> None:
         self._maybe_roll_day()
         self._maybe_lift_smoke_test()
+        # Reconcile against on-chain truth FIRST, before any kill switch
+        # check. Without this, the bot can be fooled by a stale state file
+        # that says "no open positions" when the wallet actually has $30+
+        # of exposure from previous runs whose cancel-all didn't unwind
+        # filled positions. (Added 2026-06-09 after the smoke-test
+        # duplication incident.)
+        wallet = self.cfg.proxy_address
+        try:
+            summary = onchain_reconcile.reconcile(self.sm, wallet, config=self.cfg)
+            self.sm.update(onchain_positions_by_market=summary["positions_by_market"])
+            if summary["over_exposure_limit"]:
+                self.notifier.error(
+                    f"On-chain exposure ${summary['open_exposure_usd']:.2f} "
+                    f"exceeds cap ${self.cfg.total_open_exposure_usd:.2f}. "
+                    f"Halting until manual reconciliation."
+                )
+        except Exception as e:
+            self.log.warning(f"on-chain reconcile failed: {type(e).__name__}: {e}")
         decision = self.ks.check()
         if not decision.allowed:
             self.log.info(f"Skipping tick — {decision.reason}")
@@ -173,11 +192,29 @@ class BotRunner:
         candidates = await self._fetch_candidates()
         self.log.info(f"Fetched {len(candidates)} sports markets")
 
+        # Markets the user already has an open position in (on-chain).
+        # During smoke test we additionally reject these — the smoke test
+        # is "1 position per market", not "1 trade per day". Prevents the
+        # 5x duplication incident from 2026-06-09.
+        held_markets = set()
+        s = self.sm.read()
+        onchain_by_market = s.get("onchain_positions_by_market", {}) or {}
+        for cid, by_outcome in onchain_by_market.items():
+            total = sum(float(v) for v in by_outcome.values() if v)
+            if total > 0:
+                held_markets.add(cid)
+
         placed = 0
         for market in candidates:
             off = _is_offtopic(market)
             if off:
                 self.log.debug(f"Reject off-topic: {market.get('question','?')[:50]} — {off}")
+                continue
+            if market.get("condition_id") in held_markets:
+                self.log.debug(
+                    f"Reject smoke-test: already hold "
+                    f"{market.get('condition_id', '?')[:12]}… on-chain"
+                )
                 continue
             sig = evaluate_market(market, config=self.cfg)
             if not sig.accepted:

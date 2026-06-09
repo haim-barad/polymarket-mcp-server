@@ -54,6 +54,10 @@ class BotConfig:
     )
     news_blacklist_keywords: tuple = ()
 
+    # Wallet address (used by onchain_reconcile). Override with
+    # POLYMARKET_BOT_PROXY_ADDRESS env var.
+    proxy_address: str = "0x55183ffA1a169C2bc92d8b5E9B5Aeb444A637023"
+
     # Telegram
     telegram_alerts_enabled: bool = True
     daily_summary_utc_hour: int = 18
@@ -71,7 +75,11 @@ class BotConfig:
     @classmethod
     def load(cls) -> "BotConfig":
         alerts = os.environ.get("BOT_TELEGRAM_ALERTS", "true").lower() in ("1", "true", "yes")
-        return cls(telegram_alerts_enabled=alerts)
+        proxy = os.environ.get(
+            "POLYMARKET_BOT_PROXY_ADDRESS",
+            "0x55183ffA1a169C2bc92d8b5E9B5Aeb444A637023",
+        )
+        return cls(telegram_alerts_enabled=alerts, proxy_address=proxy)
 
 
 def get_state_dir() -> Path:

@@ -66,6 +66,22 @@ class KillSwitch:
                 smoke_test_active=bool(s.get("smoke_test_active", False)),
             )
 
+        # On-chain exposure check: the on-chain wallet is the source of truth.
+        # If the user already has more open exposure than the cap (e.g. from
+        # positions placed before the bot started, or by previous bot runs
+        # whose cancel-all didn't unwind filled positions), we must not place
+        # any new trades. This was added after the smoke-test duplication
+        # incident on 2026-06-09.
+        onchain_exposure = s.get("open_exposure_usd", 0.0) or 0.0
+        if onchain_exposure > self.cfg.total_open_exposure_usd:
+            return Decision(
+                allowed=False,
+                reason=(f"on-chain exposure ${onchain_exposure:.2f} exceeds "
+                        f"cap ${self.cfg.total_open_exposure_usd:.2f} — "
+                        f"manual reconciliation required"),
+                smoke_test_active=bool(s.get("smoke_test_active", False)),
+            )
+
         return Decision(
             allowed=True,
             reason="ok",
