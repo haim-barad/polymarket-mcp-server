@@ -12,9 +12,16 @@ import sys
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Resolve the polymarket-mcp-server repo location. Override with the env var
+# POLYMARKET_MCP_REPO if the bot is running from a different location (e.g.
+# launchd service in ~/.hermes/polymarket-bot/ but repo lives in Documents/).
+_REPO_ROOT = os.environ.get(
+    "POLYMARKET_MCP_REPO",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)
 _VENV_PY = os.path.join(_REPO_ROOT, "venv", "bin", "python")
-sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
+if os.path.isdir(os.path.join(_REPO_ROOT, "src")):
+    sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
 
 @asynccontextmanager

@@ -6,12 +6,14 @@ and smoke-test logic is the bot's responsibility — not the MCP server's.
 from __future__ import annotations
 import os
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Optional
 
 
+# State dir: override with POLYMARKET_BOT_STATE_DIR env var, default to bot/.
 _BOT_DIR = Path(__file__).resolve().parent
-_STATE_DIR = _BOT_DIR / "state"
+_STATE_DIR = Path(os.environ.get("POLYMARKET_BOT_STATE_DIR", str(_BOT_DIR / "state")))
 
 
 @dataclass(frozen=True)
