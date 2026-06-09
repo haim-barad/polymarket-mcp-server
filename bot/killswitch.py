@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from config import BotConfig
-from state_manager import StateManager
+from bot.config import BotConfig
+from bot.state_manager import StateManager
 
 
 @dataclass(frozen=True)

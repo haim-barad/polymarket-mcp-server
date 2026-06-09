@@ -1,4 +1,4 @@
-from config import BotConfig
+from bot.config import BotConfig
 
 
 def test_config_loads_defaults():

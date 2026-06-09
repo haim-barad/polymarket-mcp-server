@@ -9,12 +9,12 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from config import BotConfig
-from state_manager import StateManager
-from killswitch import KillSwitch
-from signal_filter import evaluate_market
-from notifier import Notifier
-import mcp_client
+from bot.config import BotConfig
+from bot.state_manager import StateManager
+from bot.killswitch import KillSwitch
+from bot.signal_filter import evaluate_market
+from bot.notifier import Notifier
+import bot.mcp_client as mcp_client
 
 
 # Off-topic content filter: markets that the MCP "sports" tag includes

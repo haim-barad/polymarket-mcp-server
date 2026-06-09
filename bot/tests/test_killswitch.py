@@ -1,8 +1,8 @@
 import tempfile
 from pathlib import Path
 
-from killswitch import KillSwitch
-from state_manager import StateManager
+from bot.killswitch import KillSwitch
+from bot.state_manager import StateManager
 
 
 def test_killswitch_blocks_when_daily_loss_hit():

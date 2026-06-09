@@ -33,7 +33,7 @@ class BotConfig:
     in_band_high: float = 0.70
     min_liquidity_usd: float = 1000.0
     time_to_resolution_min_hours: float = 6.0
-    time_to_resolution_max_days: float = 7.0
+    time_to_resolution_max_days: float = 28.0
     order_ttl_seconds: int = 600
     tick_interval_seconds: int = 300
 

@@ -1,9 +1,9 @@
-from signal_filter import evaluate_market
+from bot.signal_filter import evaluate_market
 
 
 def test_filter_rejects_out_of_band():
     m = {
-        "question": "Will the Lakers win?",
+        "question": "NBA: Will the Lakers win?",
         "best_ask": 0.20,
         "liquidity_usd": 5000.0,
         "end_date_utc": "2026-06-12T00:00:00Z",
@@ -16,7 +16,7 @@ def test_filter_rejects_out_of_band():
 
 def test_filter_rejects_low_liquidity():
     m = {
-        "question": "Lakers vs Celtics",
+        "question": "NBA: Lakers vs Celtics",
         "best_ask": 0.45,
         "liquidity_usd": 500.0,
         "end_date_utc": "2026-06-12T00:00:00Z",
@@ -53,7 +53,7 @@ def test_filter_rejects_too_far_to_resolution():
 
 def test_filter_rejects_blacklist_keyword():
     m = {
-        "question": "Esports tournament winner",
+        "question": "Esports tournament NBA winner",
         "best_ask": 0.45,
         "liquidity_usd": 5000.0,
         "end_date_utc": "2026-06-12T00:00:00Z",

@@ -1,6 +1,6 @@
 import tempfile
 
-from state_manager import StateManager
+from bot.state_manager import StateManager
 
 
 def test_state_file_atomic_write_and_read():

@@ -3,12 +3,12 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from config import BotConfig
+from bot.config import BotConfig
 
 log = logging.getLogger("polymarket_bot.notifier")
 
 try:
-    from telegram_notify import notify as _tg_notify
+    from bot.telegram_notify import notify as _tg_notify
     _IMPORT_OK = True
 except ImportError:
     _IMPORT_OK = False

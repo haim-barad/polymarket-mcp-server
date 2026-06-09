@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from config import BotConfig
+from bot.config import BotConfig
 
 
 @dataclass(frozen=True)
@@ -12,6 +12,28 @@ class SignalDecision:
     accepted: bool
     reason: str
     size_usd: float = 0.0
+
+
+# Off-topic content filter (canonical location). The MCP gamma API\'s "Sports"
+# tag is loose — it includes pop culture, news, and "before-event-X" markets.
+# Reject anything that doesn\'t look like a real sports / high-tech / news
+# question. Word-boundary check so "GTA" doesn\'t trip on "GTA VI".
+import re as _re
+_OFFTOPIC_PATTERNS = (
+    r"\balbum\b", r"\bmovie\b", r"\btv show\b", r"\btv series\b",
+    r"\bsong\b", r"\bsingle\b", r"\brelease party\b", r"\bgrammy\b",
+    r"\boscar\b", r"\bemmy\b", r"\bcelebrity\b", r"\bkardashian\b",
+    r"\btwitter\b", r"\btiktok\b", r"\binstagram\b", r"\byoutube\b",
+    r"\bbox office\b", r"\bstreaming\b", r"\bspotify\b", r"\bbillboard\b",
+    r"\bnft\b", r"\bcrypto price\b", r"\bbitcoin price\b", r"\beth price\b",
+)
+_OFFTOPIC_RE = _re.compile("|".join(_OFFTOPIC_PATTERNS), _re.IGNORECASE)
+
+
+def _is_offtopic(question: str) -> Optional[str]:
+    """Return the off-topic keyword matched, or None if clean."""
+    m = _OFFTOPIC_RE.search(question)
+    return m.group(0) if m else None
 
 
 def evaluate_market(
@@ -24,16 +46,30 @@ def evaluate_market(
 
     category = (market.get("category") or "").lower()
     if category not in [c.lower() for c in cfg.enabled_categories]:
-        return SignalDecision(False, f"category '{category}' not in enabled set")
+        return SignalDecision(False, f"category \'{category}\' not in enabled set")
 
-    question = (market.get("question") or market.get("slug") or "").lower()
+    question = (market.get("question") or market.get("slug") or "")
+    question_lc = question.lower()
 
+    # 1. Off-topic content filter (canonical location)
+    off = _is_offtopic(question)
+    if off:
+        return SignalDecision(False, f"off-topic content: \'{off}\'")
+
+    # 2. Per-category keyword blacklist
     blacklist = list(cfg.sports_blacklist_keywords)
     if category in ("hightech", "high_tech", "high-tech"):
         blacklist += list(cfg.hightech_blacklist_keywords)
     for kw in blacklist:
-        if kw.lower() in question:
-            return SignalDecision(False, f"blacklist keyword '{kw}' in '{question[:60]}'")
+        if kw.lower() in question_lc:
+            return SignalDecision(False, f"blacklist keyword \'{kw}\' in \'{question[:60]}\'")
+
+    # 3. Sports whitelist: question must mention at least one whitelisted league.
+    #    Polymarket\'s gamma "Sports" tag is loose; this narrows to real sports.
+    if category == "sports" and cfg.sports_whitelist:
+        if not any(league.lower() in question_lc for league in cfg.sports_whitelist):
+            leagues = ", ".join(cfg.sports_whitelist[:4])
+            return SignalDecision(False, f"no whitelisted league in question (want one of: {leagues}…)")
 
     best_ask = market.get("best_ask")
     if best_ask is None or not (cfg.in_band_low <= best_ask <= cfg.in_band_high):
