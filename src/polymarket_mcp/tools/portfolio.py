@@ -82,7 +82,7 @@ async def get_all_positions(
     rate_limiter,
     config,
     include_closed: bool = False,
-    min_value: float = 1.0,
+    min_value: float = 0.0,
     sort_by: Literal['value', 'pnl', 'size'] = 'value'
 ) -> List[types.TextContent]:
     """
@@ -93,7 +93,7 @@ async def get_all_positions(
         rate_limiter: RateLimiter instance
         config: PolymarketConfig instance
         include_closed: Include closed positions (default: False)
-        min_value: Minimum position value in USD (default: 1.0)
+        min_value: Minimum position value in USD (default: 0.0 — show all positions)
         sort_by: Sort field - 'value', 'pnl', or 'size' (default: 'value')
 
     Returns:
