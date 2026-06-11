@@ -54,6 +54,16 @@ class StateManager:
                     pnl_usd REAL
                 )
             """)
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS strategy_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts_utc TEXT NOT NULL,
+                    strategy TEXT NOT NULL,
+                    event_title TEXT,
+                    action TEXT,
+                    detail_json TEXT
+                )
+            """)
 
     @contextmanager
     def _connect(self):
@@ -131,6 +141,25 @@ class StateManager:
                 (today,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def record_strategy_event(self, *, strategy: str, event_title: str,
+                              action: str, detail: Optional[dict] = None) -> int:
+        """Log a strategy-level event (arb found, arb executed, daily digest,
+        etc.) for later analysis."""
+        with self._connect() as con:
+            cur = con.execute(
+                """INSERT INTO strategy_events
+                   (ts_utc, strategy, event_title, action, detail_json)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    strategy,
+                    (event_title or "")[:200],
+                    action,
+                    json.dumps(detail or {}),
+                ),
+            )
+            return cur.lastrowid
 
     def realized_pnl_today(self) -> float:
         today = datetime.now(timezone.utc).date().isoformat()
