@@ -21,7 +21,7 @@ class BotConfig:
     # Risk rails (HARD caps — bot refuses to violate)
     per_trade_usd: float = 2.50
     per_trade_cap_usd: float = 5.00
-    total_open_exposure_usd: float = 30.00
+    total_open_exposure_usd: float = 50.00
     daily_loss_stop_usd: float = 10.00
     weekly_soft_alert_usd: float = 20.00
     daily_trade_count_max: int = 5
