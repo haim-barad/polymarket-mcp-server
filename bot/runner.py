@@ -16,6 +16,8 @@ from bot.signal_filter import evaluate_market
 from bot.notifier import Notifier
 import bot.mcp_client as mcp_client
 import bot.onchain_reconcile as onchain_reconcile
+import bot.arb_detector as arb_detector
+import bot.arb_executor as arb_executor
 
 
 # Off-topic content filter: markets that the MCP "sports" tag includes
@@ -72,6 +74,8 @@ class BotRunner:
         today = datetime.now(timezone.utc).date().isoformat()
         if s.get("today_utc_date") != today:
             self.log.info(f"Day roll: {s.get('today_utc_date')} → {today}")
+            # Send a Telegram digest of yesterday's arb findings
+            self._send_daily_arb_digest()
             self.sm.update(
                 today_utc_date=today,
                 today_realized_pnl_usd=0.0,
@@ -79,6 +83,42 @@ class BotRunner:
                 today_consecutive_failures=0,
                 cap_alert_sent_tick=False,
             )
+
+    def _send_daily_arb_digest(self) -> None:
+        """Pull all strategy_events from the past 24h, summarize for Haim.
+        Sends to Telegram via the notifier. Cheap and one-shot per day.
+        """
+        try:
+            with self.sm._connect() as con:
+                rows = con.execute(
+                    """SELECT strategy, event_title, action, detail_json
+                       FROM strategy_events
+                       WHERE substr(ts_utc, 1, 10) >= date('now', '-1 day')
+                       ORDER BY id"""
+                ).fetchall()
+            if not rows:
+                return
+            # Aggregate: count by event_title + action
+            from collections import Counter
+            detected = Counter()
+            executed = Counter()
+            for r in rows:
+                r = dict(r)
+                title = (r.get("event_title") or "?")[:50]
+                if r.get("action") == "detected":
+                    detected[title] += 1
+                elif r.get("action") == "trade_placed":
+                    executed[title] += 1
+            if not detected and not executed:
+                return
+            lines = ["*Arb digest (last 24h)*"]
+            for title, count in detected.most_common(10):
+                ex = executed.get(title, 0)
+                lines.append(f"* {title}  detected={count}  executed={ex}")
+            text = "\n".join(lines)
+            self.notifier._send(text, silent=True)
+        except Exception as e:
+            self.log.warning(f"daily arb digest failed: {type(e).__name__}: {e}")
 
     def _maybe_lift_smoke_test(self) -> None:
         s = self.sm.read()
@@ -101,6 +141,32 @@ class BotRunner:
                 smoke_test_lift_at_utc=lift_at.isoformat(),
             )
             self.log.info(f"Smoke test initialized — lifts at {lift_at.isoformat()}")
+
+    async def _fetch_events(self) -> list[dict]:
+        """Fetch active events from gamma-api (group-level, not market-level).
+
+        Pages through up to 4 pages (400 events) to get good coverage of
+        the multi-outcome event space. The detector needs a meaningful
+        sample size to find arbs — 100 events only catches the most
+        obvious ones.
+        """
+        import urllib.request
+        all_events = []
+        loop = asyncio.get_event_loop()
+        for offset in (0, 100, 200, 300):
+            url = f"https://gamma-api.polymarket.com/events?closed=false&limit=100&offset={offset}"
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "polymarket-bot/1.0"})
+                data = await loop.run_in_executor(None, lambda: urllib.request.urlopen(req, timeout=20).read())
+                events = json.loads(data)
+                if isinstance(events, list):
+                    all_events.extend(events)
+                if len(events) < 100:
+                    break  # last page
+            except Exception as e:
+                self.log.warning(f"_fetch_events offset={offset} failed: {type(e).__name__}: {e}")
+                break
+        return all_events
 
     async def _fetch_candidates(self) -> list[dict]:
         try:
@@ -142,6 +208,103 @@ class BotRunner:
                 continue
         return candidates
 
+    async def _scan_and_execute_arbs(self) -> list[dict]:
+        """Run the multi-outcome arb detector, size and place orders.
+
+        Called once per tick. Returns a list of trade records placed
+        (so the caller can log them and update the daily trade count).
+        """
+        events = await self._fetch_events()
+        if not events:
+            self.log.info("Arb scan: 0 events fetched from gamma-api")
+            return []
+        self.log.info(f"Arb scan: fetched {len(events)} events from gamma-api")
+        opportunities = arb_detector.scan_events(events)
+        if not opportunities:
+            self.log.debug(f"Arb scan: 0 opportunities in {len(events)} events")
+            return []
+        # Cap at top-3 arbs per tick (don't flood the orderbook on a busy day)
+        opportunities = opportunities[:3]
+        self.log.info(
+            f"Arb scan: {len(opportunities)} opportunities in {len(events)} events: "
+            + ", ".join(f"{o.event_title[:30]}({o.gross_return_pct*100:.0f}%)" for o in opportunities)
+        )
+        # Record each detection
+        for opp in opportunities:
+            self.sm.record_strategy_event(
+                strategy="multi_outcome_arb",
+                event_title=opp.event_title,
+                action="detected",
+                detail={"sum_yes": opp.sum_yes, "deviation": opp.deviation,
+                        "n_buckets": opp.n_buckets, "gross_return_pct": opp.gross_return_pct},
+            )
+        all_trades: list[dict] = []
+        for opp in opportunities:
+            enriched = await arb_executor.enrich_opportunity(opp)
+            per_bucket_usd, buyable = arb_executor.size_for_opportunity(
+                enriched, cap_usd=self.cfg.per_trade_cap_usd,
+                total_cap_usd=self.cfg.total_open_exposure_usd,
+            )
+            if per_bucket_usd < 0.50 or not buyable:
+                self.log.info(
+                    f"Arb {opp.event_title[:40]}: skip — too thin "
+                    f"(size ${per_bucket_usd:.2f}, {len(buyable)} buyable buckets)"
+                )
+                continue
+            # Pre-trade cap check: how much would this cost?
+            est_cost = per_bucket_usd * len(buyable)
+            from bot import onchain_reconcile as _oc_for_arb
+            fresh = _oc_for_arb.fetch_positions(self.cfg.proxy_address, min_value=0.0)
+            current = sum(p.get("current_value", 0) for p in fresh)
+            # Use headroom-aware sizing: shrink per_bucket to fit under
+            # (cap - current_exposure). Otherwise a $29 wallet with a
+            # $50 cap can never execute a $25 arb because $29 + $25 > $50.
+            available_headroom = max(0.0, self.cfg.total_open_exposure_usd - current)
+            max_per_bucket_for_headroom = available_headroom / max(1, len(buyable))
+            if per_bucket_usd > max_per_bucket_for_headroom:
+                shrunk = max_per_bucket_for_headroom
+                if shrunk < 0.50:
+                    self.log.info(
+                        f"Arb {opp.event_title[:40]}: skip — only ${available_headroom:.2f} "
+                        f"headroom, need ${per_bucket_usd * len(buyable):.2f}"
+                    )
+                    continue
+                self.log.info(
+                    f"Arb {opp.event_title[:40]}: shrunk per_bucket ${per_bucket_usd:.2f} → "
+                    f"${shrunk:.2f} to fit headroom (current=${current:.2f}, cap=${self.cfg.total_open_exposure_usd:.2f})"
+                )
+                per_bucket_usd = shrunk
+            est_cost = per_bucket_usd * len(buyable)
+            if current + est_cost > self.cfg.total_open_exposure_usd:
+                self.log.info(
+                    f"Arb {opp.event_title[:40]}: pre-trade cap would push exposure "
+                    f"${current + est_cost:.2f} > cap ${self.cfg.total_open_exposure_usd:.2f}"
+                )
+                continue
+            # Execute
+            def on_trade(trade):
+                self.sm.record_strategy_event(
+                    strategy="multi_outcome_arb",
+                    event_title=opp.event_title,
+                    action="trade_placed",
+                    detail={"bucket": trade.get("bucket_title"),
+                            "size_usd": trade.get("size_usd"),
+                            "price": trade.get("price")},
+                )
+            trades = await arb_executor.execute_arb(
+                enriched, on_trade_placed=on_trade,
+                cap_usd=self.cfg.per_trade_cap_usd,
+            )
+            if trades:
+                all_trades.extend(trades)
+                self.log.info(
+                    f"Arb placed: {opp.event_title[:50]} → {len(trades)} buckets, "
+                    f"~${sum(t['size_usd'] for t in trades):.2f} deployed"
+                )
+                # One arb per tick is plenty — don't queue more
+                break
+        return all_trades
+
     async def _place_order(self, market: dict, size_usd: float, price: float) -> Optional[str]:
         try:
             result = await mcp_client.call_tool("create_limit_order", {
@@ -170,6 +333,34 @@ class BotRunner:
         # Reset the once-per-tick Telegram cap-alert flag so the user
         # gets pinged if the cap is hit again on a later tick.
         self.sm.update(cap_alert_sent_tick=False)
+        # 1. Try the multi-outcome arb scanner first — it has the highest
+        #    conviction (structural mispricing, no info-edge needed).
+        try:
+            arb_trades = await self._scan_and_execute_arbs()
+            for trade in arb_trades:
+                self.sm.update(
+                    today_trade_count=self.sm.read().get("today_trade_count", 0) + 1,
+                )
+                self.sm.record_trade(
+                    condition_id=trade.get("token_id", ""),
+                    token_id=trade.get("token_id", ""),
+                    side="BUY",
+                    price=trade.get("price", 0),
+                    size_usd=trade.get("size_usd", 0),
+                    status="OPEN",
+                    order_id=trade.get("order_id", ""),
+                )
+                self.notifier.trade_opened(
+                    market_question=trade.get("event_title", "?") + " — " + trade.get("bucket_title", ""),
+                    side="BUY",
+                    price=trade.get("price", 0),
+                    size_usd=trade.get("size_usd", 0),
+                    order_id=trade.get("order_id", ""),
+                )
+            if arb_trades:
+                self.log.info(f"Arb tick: {len(arb_trades)} trades placed")
+        except Exception as e:
+            self.log.warning(f"arb scan failed: {type(e).__name__}: {e}")
         # Reconcile against on-chain truth FIRST, before any kill switch
         # check. Without this, the bot can be fooled by a stale state file
         # that says "no open positions" when the wallet actually has $30+
