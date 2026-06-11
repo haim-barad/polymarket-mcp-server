@@ -23,6 +23,7 @@ _DEFAULT_STATE: dict[str, Any] = {
     "open_position_count": 0,
     "open_exposure_usd": 0.0,
     "onchain_positions_by_market": {},
+    "cap_alert_sent_tick": False,
 }
 
 

@@ -77,6 +77,7 @@ class BotRunner:
                 today_realized_pnl_usd=0.0,
                 today_trade_count=0,
                 today_consecutive_failures=0,
+                cap_alert_sent_tick=False,
             )
 
     def _maybe_lift_smoke_test(self) -> None:
@@ -166,6 +167,9 @@ class BotRunner:
     async def tick(self) -> None:
         self._maybe_roll_day()
         self._maybe_lift_smoke_test()
+        # Reset the once-per-tick Telegram cap-alert flag so the user
+        # gets pinged if the cap is hit again on a later tick.
+        self.sm.update(cap_alert_sent_tick=False)
         # Reconcile against on-chain truth FIRST, before any kill switch
         # check. Without this, the bot can be fooled by a stale state file
         # that says "no open positions" when the wallet actually has $30+
@@ -221,6 +225,36 @@ class BotRunner:
                 self.log.debug(f"Reject signal: {market.get('question','?')[:50]} — {sig.reason}")
                 continue
             size = min(sig.size_usd, self.cfg.per_trade_cap_usd)
+            # Pre-trade cap check (added 2026-06-10): refuse to place an
+            # order that would push on-chain exposure over the cap. The
+            # kill switch also blocks on overage, but only as a circuit
+            # breaker AFTER the fact — this prevents the thrashing where
+            # every tick re-crosses the line and floods Telegram with
+            # "exposure $X exceeds cap" alerts. Get fresh exposure from
+            # the data-api right before the trade so the decision uses
+            # ground truth, not the last reconcile (which may be up to
+            # 5 min stale).
+            from bot import onchain_reconcile as _oc_for_check
+            fresh = _oc_for_check.fetch_positions(self.cfg.proxy_address, min_value=0.0)
+            current = sum(p.get("current_value", 0) for p in fresh)
+            if current + size > self.cfg.total_open_exposure_usd:
+                self.log.info(
+                    f"Pre-trade cap: would push exposure "
+                    f"${current + size:.2f} > cap ${self.cfg.total_open_exposure_usd:.2f} "
+                    f"(this trade ${size:.2f} skipped)"
+                )
+                # Surface the first one in each tick to Telegram, but only
+                # if the trade WOULD have placed (size > 0). The kill-switch
+                # halt message already covers the "we're over cap" case.
+                if placed == 0 and not self.sm.read().get("cap_alert_sent_tick"):
+                    self.notifier.error(
+                        f"Pre-trade cap: skipping ${size:.2f} trade — "
+                        f"on-chain ${current:.2f} + ${size:.2f} would exceed "
+                        f"cap ${self.cfg.total_open_exposure_usd:.2f}. "
+                        f"Bot resumes once exposure is reduced."
+                    )
+                    self.sm.update(cap_alert_sent_tick=True)
+                continue
             order_id = await self._place_order(
                 market, size_usd=size, price=market["best_ask"]
             )
