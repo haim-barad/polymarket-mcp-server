@@ -44,6 +44,23 @@ class Notifier:
     def error(self, err: str) -> None:
         self._send(f"❌ *Bot error* — {err}")
 
+
+    def arb_digest(self, opportunities: list) -> None:
+        """Daily Telegram digest of arbs found. Called once per day."""
+        if not opportunities:
+            return
+        lines = ["*Arb digest: " + str(len(opportunities)) + " opportunities found*"]
+        for o in opportunities[:10]:
+            lines.append(
+                "* " + str(o.get("event_title", "?"))[:50]
+                + "  sum=" + format(o.get("sum_yes", 0), ".2f")
+                + "  dev=" + str(int(o.get("deviation", 0) * 100)) + "%"
+                + "  buckets=" + str(o.get("n_buckets", 0))
+                + "  liq=$" + format(o.get("total_liquidity", 0), ",.0f")
+            )
+        text = "\n".join(lines)  # \n is escape sequence in source = real newline
+        self._send(text, silent=True)
+
     def daily_summary(self, *, trades: int, pnl_usd: float,
                       open_positions: int, exposure_usd: float,
                       smoke_test_active: bool) -> None:

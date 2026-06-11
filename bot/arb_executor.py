@@ -19,10 +19,12 @@ from __future__ import annotations
 import asyncio
 import json
 import urllib.request
+from pathlib import Path
 from typing import Optional
 
 import bot.mcp_client as mcp_client
 import bot.arb_detector as arb_detector
+from bot import smart_exit
 
 
 # Liquidity tiers: 7-day average volume thresholds (USD/day)
@@ -223,11 +225,13 @@ async def execute_arb(
                 result = json.loads(result)
             order_id = (result.get("orderID") or result.get("order_id") or result.get("id"))
             if order_id:
+                size_shares = per_bucket_usd / price if price > 0 else 0.0
                 trade = {
                     "token_id": token_id,
                     "side": "BUY",
                     "price": price,
                     "size_usd": per_bucket_usd,
+                    "size_shares": size_shares,
                     "order_id": str(order_id),
                     "bucket_title": opp.bucket_titles[bucket_idx],
                     "event_title": opp.event_title,
@@ -235,6 +239,15 @@ async def execute_arb(
                 trades.append(trade)
                 if on_trade_placed is not None:
                     on_trade_placed(trade)
+                # Record cost basis so smart-exit can find this later
+                try:
+                    smart_exit.record_buy(
+                        state_dir=Path("/Users/haimbarad/.hermes/polymarket-bot/state"),
+                        token_id=token_id, buy_price=price,
+                        size_shares=size_shares, kind="arb_bucket",
+                    )
+                except Exception as rec_err:
+                    print(f"[arb_executor] record_buy err: {rec_err}")
         except Exception as e:
             # Order failed (insufficient balance, market closed, etc.)
             # Log and continue. Don't fail the whole arb on one bucket.

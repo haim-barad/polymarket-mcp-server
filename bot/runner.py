@@ -18,6 +18,7 @@ import bot.mcp_client as mcp_client
 import bot.onchain_reconcile as onchain_reconcile
 import bot.arb_detector as arb_detector
 import bot.arb_executor as arb_executor
+import bot.smart_exit as smart_exit
 
 
 # Off-topic content filter: markets that the MCP "sports" tag includes
@@ -305,6 +306,75 @@ class BotRunner:
                 break
         return all_trades
 
+
+    async def _run_smart_exit(self) -> list[dict]:
+        """Evaluate open directional positions and exit ones that meet
+        take-profit or cut-loss criteria. Returns a list of trade records
+        placed (so the caller can log them and update daily trade count).
+        """
+        try:
+            smart_exit.ensure_positions_cost_table(self.cfg.state_dir)
+        except Exception as e:
+            self.log.warning(f"smart_exit table init failed: {e}")
+            return []
+        positions = smart_exit.fetch_all_directional_positions(self.cfg.state_dir)
+        if not positions:
+            return []
+        self.log.debug(f"Smart exit: evaluating {len(positions)} directional positions")
+        trades = []
+        for pos in positions:
+            try:
+                # Fetch current price from CLOB
+                book = await smart_exit.fetch_token_book(pos.token_id)
+                asks = book.get("asks", [])
+                bids = book.get("bids", [])
+                # Use best bid as the current "fair" price for an exit decision
+                # (we'd SELL at the best bid, not at the best ask)
+                if not bids:
+                    continue
+                # Best bid is highest price (sort desc)
+                best_bid = float(sorted(bids, key=lambda b: -float(b.get("price", 0)))[0].get("price"))
+                # Hours to resolution: not implemented in v1 (would need
+                # to look up the endDate of the market via CLOB). Skip
+                # the near_res_lost check for now.
+                decision = smart_exit.evaluate_position(
+                    pos, current_price=best_bid
+                )
+                if decision.decision == "hold":
+                    continue
+                self.log.info(
+                    f"Smart exit: {decision.decision} on {pos.token_id[:12]}... "
+                    f"({decision.pct_change*100:+.0f}% from entry) — {decision.reasoning}"
+                )
+                # Place SELL order at the best bid (limit order)
+                order_id = await smart_exit.place_sell_order(
+                    pos.token_id, best_bid, decision.shares_to_sell
+                )
+                if order_id:
+                    self.sm.record_strategy_event(
+                        strategy="smart_exit",
+                        event_title=pos.token_id[:20],
+                        action=decision.decision,
+                        detail={"shares": decision.shares_to_sell,
+                                "price": best_bid,
+                                "pct_change": decision.pct_change,
+                                "reasoning": decision.reasoning},
+                    )
+                    trades.append({
+                        "token_id": pos.token_id,
+                        "side": "SELL",
+                        "price": best_bid,
+                        "size_shares": decision.shares_to_sell,
+                        "order_id": order_id,
+                        "decision": decision.decision,
+                    })
+                    smart_exit.mark_evaluated(self.cfg.state_dir, pos.token_id, decision.decision)
+            except Exception as e:
+                self.log.warning(f"smart_exit error for {pos.token_id[:12]}: {e}")
+        if trades:
+            self.log.info(f"Smart exit: placed {len(trades)} sell orders")
+        return trades
+
     async def _place_order(self, market: dict, size_usd: float, price: float) -> Optional[str]:
         try:
             result = await mcp_client.call_tool("create_limit_order", {
@@ -361,6 +431,33 @@ class BotRunner:
                 self.log.info(f"Arb tick: {len(arb_trades)} trades placed")
         except Exception as e:
             self.log.warning(f"arb scan failed: {type(e).__name__}: {e}")
+        # 2. Smart exit: evaluate directional positions for take-profit / cut-loss
+        try:
+            exit_trades = await self._run_smart_exit()
+            for trade in exit_trades:
+                self.sm.update(
+                    today_trade_count=self.sm.read().get("today_trade_count", 0) + 1,
+                )
+                self.sm.record_trade(
+                    condition_id=trade.get("token_id", ""),
+                    token_id=trade.get("token_id", ""),
+                    side="SELL",
+                    price=trade.get("price", 0),
+                    size_usd=trade.get("price", 0) * trade.get("size_shares", 0),
+                    status="OPEN",
+                    order_id=trade.get("order_id", ""),
+                )
+                self.notifier.trade_opened(
+                    market_question=f"smart exit {trade.get('decision', '?')}",
+                    side="SELL",
+                    price=trade.get("price", 0),
+                    size_usd=trade.get("price", 0) * trade.get("size_shares", 0),
+                    order_id=trade.get("order_id", ""),
+                )
+            if exit_trades:
+                self.log.info(f"Smart exit: {len(exit_trades)} sell orders placed")
+        except Exception as e:
+            self.log.warning(f"smart exit failed: {type(e).__name__}: {e}")
         # Reconcile against on-chain truth FIRST, before any kill switch
         # check. Without this, the bot can be fooled by a stale state file
         # that says "no open positions" when the wallet actually has $30+
@@ -464,6 +561,19 @@ class BotRunner:
                     status="OPEN",
                     order_id=order_id,
                 )
+                # Record cost basis for smart-exit (directional = sports-market path)
+                try:
+                    from bot import smart_exit as _se_for_trade
+                    _se_for_trade.ensure_positions_cost_table(self.cfg.state_dir)
+                    _se_for_trade.record_buy(
+                        state_dir=self.cfg.state_dir,
+                        token_id=market.get("token_id", ""),
+                        buy_price=market["best_ask"],
+                        size_shares=size / market["best_ask"] if market["best_ask"] > 0 else 0.0,
+                        kind="directional",
+                    )
+                except Exception as rec_err:
+                    self.log.warning(f"positions_cost record_buy err: {rec_err}")
                 self.notifier.trade_opened(
                     market_question=market.get("question", ""),
                     side="BUY", price=market["best_ask"],
