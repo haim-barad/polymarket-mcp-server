@@ -48,7 +48,12 @@ def _load_env() -> dict[str, str]:
 
 
 def _format(text: str) -> tuple[str, str]:
-    """Return (chat_id, url-encoded text) for a simple message."""
+    """Return (chat_id, url-encoded text) for a simple message.
+
+    Escapes Markdown-special characters (underscores, asterisks, brackets)
+    in the text before sending, so snake_case identifiers in messages
+    don't get interpreted as italic and cause HTTP 400 errors.
+    """
     env = _load_env()
     token = env.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = env.get("TELEGRAM_HOME_CHANNEL", "")
@@ -57,6 +62,11 @@ def _format(text: str) -> tuple[str, str]:
             "TELEGRAM_BOT_TOKEN / TELEGRAM_HOME_CHANNEL not set. "
             "Check ~/.hermes/.env or run `hermes gateway setup telegram`."
         )
+    # Escape Markdown special chars (other than those in our formatting).
+    # The safest is to escape _, *, [, ], `, \ which are the Markdown
+    # reserved characters in Telegram's Markdown mode.
+    for ch in ("_", "*", "[", "]", "`"):
+        text = text.replace(ch, "\\" + ch)
     return chat_id, urllib.parse.urlencode({
         "chat_id": chat_id,
         "text": text,
