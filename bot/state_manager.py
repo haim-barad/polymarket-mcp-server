@@ -24,6 +24,8 @@ _DEFAULT_STATE: dict[str, Any] = {
     "open_exposure_usd": 0.0,
     "onchain_positions_by_market": {},
     "cap_alert_sent_tick": False,
+    "cap_alert_sent_today": False,
+    "pre_trade_cap_logged_today": False,
 }
 
 

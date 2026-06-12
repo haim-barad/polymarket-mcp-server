@@ -83,6 +83,8 @@ class BotRunner:
                 today_trade_count=0,
                 today_consecutive_failures=0,
                 cap_alert_sent_tick=False,
+                cap_alert_sent_today=False,
+                pre_trade_cap_logged_today=False,
             )
 
     def _send_daily_arb_digest(self) -> None:
@@ -277,10 +279,16 @@ class BotRunner:
                 per_bucket_usd = shrunk
             est_cost = per_bucket_usd * len(buyable)
             if current + est_cost > self.cfg.total_open_exposure_usd:
-                self.log.info(
-                    f"Arb {opp.event_title[:40]}: pre-trade cap would push exposure "
-                    f"${current + est_cost:.2f} > cap ${self.cfg.total_open_exposure_usd:.2f}"
-                )
+                # Only fire log+continue once per day per arb; reset on
+                # day-roll. Without this, the same arb re-logs every 5
+                # minutes while we're over cap.
+                if not self.sm.read().get("pre_trade_cap_logged_today", False):
+                    self.log.info(
+                        f"Arb {opp.event_title[:40]}: pre-trade cap would push exposure "
+                        f"${current + est_cost:.2f} > cap ${self.cfg.total_open_exposure_usd:.2f} "
+                        f"(won't re-log today)"
+                    )
+                    self.sm.update(pre_trade_cap_logged_today=True)
                 continue
             # Execute
             def on_trade(trade):
@@ -469,11 +477,18 @@ class BotRunner:
             summary = onchain_reconcile.reconcile(self.sm, wallet, config=self.cfg)
             self.sm.update(onchain_positions_by_market=summary["positions_by_market"])
             if summary["over_exposure_limit"]:
-                self.notifier.error(
-                    f"On-chain exposure ${summary['open_exposure_usd']:.2f} "
-                    f"exceeds cap ${self.cfg.total_open_exposure_usd:.2f}. "
-                    f"Halting until manual reconciliation."
-                )
+                # Only fire Telegram alert ONCE per day, on the transition
+                # from under-cap to over-cap. Organic growth that pushes
+                # existing positions above the cap is reported in the daily
+                # summary instead of spamming the chat.
+                if not self.sm.read().get("cap_alert_sent_today", False):
+                    self.notifier.error(
+                        f"On-chain exposure ${summary['open_exposure_usd']:.2f} "
+                        f"exceeds cap ${self.cfg.total_open_exposure_usd:.2f}. "
+                        f"Halting until manual reconciliation. "
+                        f"(will not re-alert until next day)"
+                    )
+                    self.sm.update(cap_alert_sent_today=True)
         except Exception as e:
             self.log.warning(f"on-chain reconcile failed: {type(e).__name__}: {e}")
         decision = self.ks.check()
