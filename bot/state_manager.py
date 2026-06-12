@@ -26,6 +26,11 @@ _DEFAULT_STATE: dict[str, Any] = {
     "cap_alert_sent_tick": False,
     "cap_alert_sent_today": False,
     "pre_trade_cap_logged_today": False,
+    # Edge-triggered cap alerts: fire only on the rising edge
+    # (transition from <= cap to > cap). Reset to False when exposure
+    # drops back below the cap, so the next over-cap event will re-fire.
+    "over_cap_latched": False,
+    "pre_trade_over_cap_latched": False,
 }
 
 

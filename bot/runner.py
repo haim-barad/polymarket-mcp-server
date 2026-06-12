@@ -43,6 +43,45 @@ def _is_offtopic(market: dict) -> Optional[str]:
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 
 
+def _should_alert_over_cap(
+    prev_exposure: Optional[float],
+    curr_exposure: float,
+    cap: float,
+    latched: bool,
+) -> tuple[bool, bool]:
+    """Edge-triggered over-cap alert decision.
+
+    Returns (should_alert, new_latched). Fires the alert ONLY on the rising
+    edge — the transition from at-or-under the cap to over the cap. Stays
+    silent while continuously over cap. Re-arms (returns latched=False) when
+    exposure drops back to at-or-under the cap, so the next rising edge will
+    alert again.
+
+    Haim's spec (2026-06-12): "should only appear once when it exceeds the
+    cap and not repeated until the next time it goes below the cap and then
+    re-exceeds the cap."
+
+    The previous `cap_alert_sent_today` flag fired once per UTC day regardless
+    of transitions — if Haim took action to reduce exposure but it was still
+    over cap at midnight, the next day would re-fire. The previous
+    `cap_alert_sent_tick` flag reset every tick and could fire on consecutive
+    ticks (e.g. tick N alerts, exposure stays over cap, tick N+1 reset, tick
+    N+1 alerts again). Both are level-triggered; this is edge-triggered.
+    """
+    if prev_exposure is None:
+        prev_exposure = 0.0
+    over_now = curr_exposure > cap
+    over_prev = prev_exposure > cap
+    if over_now and not over_prev:
+        # Rising edge: fire alert, latch so we don't re-fire while over cap
+        return True, True
+    if not over_now and latched:
+        # Falling edge: re-arm, no alert
+        return False, False
+    # No transition: stay in current latch state, no alert
+    return False, latched
+
+
 def _setup_logging(log_file) -> None:
     handlers = [logging.StreamHandler(sys.stdout)]
     try:
@@ -410,6 +449,13 @@ class BotRunner:
         self._maybe_lift_smoke_test()
         # Reset the once-per-tick Telegram cap-alert flag so the user
         # gets pinged if the cap is hit again on a later tick.
+        # NOTE (2026-06-12): this flag is now legacy. Both cap-alert sites
+        # below are edge-triggered via `_should_alert_over_cap` and the
+        # `over_cap_latched` / `pre_trade_over_cap_latched` state fields.
+        # The latch persists across ticks and only resets when exposure
+        # drops back below the cap — see Haim's spec: "should only appear
+        # once when it exceeds the cap and not repeated until the next
+        # time it goes below the cap and then re-exceeds the cap."
         self.sm.update(cap_alert_sent_tick=False)
         # 1. Try the multi-outcome arb scanner first — it has the highest
         #    conviction (structural mispricing, no info-edge needed).
@@ -474,21 +520,39 @@ class BotRunner:
         # duplication incident.)
         wallet = self.cfg.proxy_address
         try:
+            # Read the pre-reconcile exposure to detect the rising edge
+            # (transition from <= cap to > cap). The previous level-triggered
+            # `cap_alert_sent_today` flag would re-fire on every UTC day
+            # rollover while still over cap, and `cap_alert_sent_tick` would
+            # re-fire on every tick after a reset. Haim's spec: only fire
+            # on the rising edge, then stay silent until exposure falls back
+            # below the cap, then re-arm.
+            # NOTE: onchain_reconcile.reconcile() updates open_exposure_usd
+            # in state, so we read prev_exposure FIRST, then call reconcile,
+            # then read the new value from the returned summary (not from
+            # state, which would now reflect the post-reconcile value).
+            prev_exposure = self.sm.read().get("open_exposure_usd", 0.0) or 0.0
+            prev_latched = bool(self.sm.read().get("over_cap_latched", False))
             summary = onchain_reconcile.reconcile(self.sm, wallet, config=self.cfg)
             self.sm.update(onchain_positions_by_market=summary["positions_by_market"])
-            if summary["over_exposure_limit"]:
-                # Only fire Telegram alert ONCE per day, on the transition
-                # from under-cap to over-cap. Organic growth that pushes
-                # existing positions above the cap is reported in the daily
-                # summary instead of spamming the chat.
-                if not self.sm.read().get("cap_alert_sent_today", False):
-                    self.notifier.error(
-                        f"On-chain exposure ${summary['open_exposure_usd']:.2f} "
-                        f"exceeds cap ${self.cfg.total_open_exposure_usd:.2f}. "
-                        f"Halting until manual reconciliation. "
-                        f"(will not re-alert until next day)"
-                    )
-                    self.sm.update(cap_alert_sent_today=True)
+            should_alert, new_latched = _should_alert_over_cap(
+                prev_exposure=prev_exposure,
+                curr_exposure=summary["open_exposure_usd"],
+                cap=self.cfg.total_open_exposure_usd,
+                latched=prev_latched,
+            )
+            if should_alert:
+                self.notifier.error(
+                    f"On-chain exposure ${summary['open_exposure_usd']:.2f} "
+                    f"exceeds cap ${self.cfg.total_open_exposure_usd:.2f}. "
+                    f"Halting until manual reconciliation. "
+                    f"(will not re-alert until exposure drops back under cap)"
+                )
+            # Persist the new latch state on every transition (rising
+            # edge → latched=True, falling edge → latched=False, no
+            # transition → no write needed)
+            if new_latched != prev_latched:
+                self.sm.update(over_cap_latched=new_latched)
         except Exception as e:
             self.log.warning(f"on-chain reconcile failed: {type(e).__name__}: {e}")
         decision = self.ks.check()
@@ -546,22 +610,44 @@ class BotRunner:
                     f"${current + size:.2f} > cap ${self.cfg.total_open_exposure_usd:.2f} "
                     f"(this trade ${size:.2f} skipped)"
                 )
-                # Surface the first one in each tick to Telegram, but only
-                # if the trade WOULD have placed (size > 0). The kill-switch
-                # halt message already covers the "we're over cap" case.
-                if placed == 0 and not self.sm.read().get("cap_alert_sent_tick"):
-                    self.notifier.error(
-                        f"Pre-trade cap: skipping ${size:.2f} trade — "
-                        f"on-chain ${current:.2f} + ${size:.2f} would exceed "
-                        f"cap ${self.cfg.total_open_exposure_usd:.2f}. "
-                        f"Bot resumes once exposure is reduced."
+                # Edge-triggered Telegram alert (2026-06-12): only fire on
+                # the rising edge of the over-cap block. The previous
+                # level-triggered `cap_alert_sent_tick` flag reset every
+                # tick, so Telegram got pinged every 5 min while the
+                # exposure stayed over cap. Now we latch on the rising
+                # edge and only re-arm when exposure drops back below
+                # the cap (handled in the success branch below).
+                # The kill-switch halt message already covers the
+                # "we're over cap" case for the on-chain reconcile path.
+                if placed == 0:
+                    prev_latched = bool(
+                        self.sm.read().get("pre_trade_over_cap_latched", False)
                     )
-                    self.sm.update(cap_alert_sent_tick=True)
+                    # The pre-trade alert fires when a trade WOULD push
+                    # us over the cap, even if current exposure itself
+                    # is under the cap. The "edge" is: first time this
+                    # blocking condition is hit since we last had
+                    # headroom (latch reset by a successful trade or
+                    # by no-candidates path). If we're already latched
+                    # from a previous tick, stay silent.
+                    if not prev_latched:
+                        self.notifier.error(
+                            f"Pre-trade cap: skipping ${size:.2f} trade — "
+                            f"on-chain ${current:.2f} + ${size:.2f} would exceed "
+                            f"cap ${self.cfg.total_open_exposure_usd:.2f}. "
+                            f"Bot resumes once exposure is reduced."
+                        )
+                        self.sm.update(pre_trade_over_cap_latched=True)
                 continue
             order_id = await self._place_order(
                 market, size_usd=size, price=market["best_ask"]
             )
             if order_id:
+                # A trade was placed: re-arm the pre-trade over-cap
+                # latch. If subsequent ticks hit the cap again, the
+                # alert will fire once on the new rising edge.
+                if bool(self.sm.read().get("pre_trade_over_cap_latched", False)):
+                    self.sm.update(pre_trade_over_cap_latched=False)
                 self.sm.update(
                     today_trade_count=self.sm.read().get("today_trade_count", 0) + 1,
                     last_trade_at_utc=datetime.now(timezone.utc).isoformat(),
