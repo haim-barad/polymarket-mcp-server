@@ -397,6 +397,14 @@ class BotRunner:
                     continue
                 # Best bid is highest price (sort desc)
                 best_bid = float(sorted(bids, key=lambda b: -float(b.get("price", 0)))[0].get("price"))
+                # Skip positions the user has explicitly tagged as held
+                # (e.g. "user_hold_for_resolution"). Smart-exit will not
+                # try to cut these even if the cut-loss threshold fires.
+                if pos.last_decision and pos.last_decision.startswith("user_hold"):
+                    self.log.debug(
+                        f"smart_exit: skipping {pos.token_id[:12]} - user_hold flag set"
+                    )
+                    continue
                 # Hours to resolution: not implemented in v1 (would need
                 # to look up the endDate of the market via CLOB). Skip
                 # the near_res_lost check for now.
