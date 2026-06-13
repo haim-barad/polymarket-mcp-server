@@ -369,7 +369,23 @@ class BotRunner:
             return []
         self.log.debug(f"Smart exit: evaluating {len(positions)} directional positions")
         trades = []
+        # Skip positions that were just evaluated for the same
+        # decision (within SKIP_RETRY_MINUTES). This prevents the bot
+        # from retrying an unfilled sell on every tick when the orderbook
+        # is too thin to fill at the placed price.
+        from datetime import datetime, timezone, timedelta
+        SKIP_RETRY_MINUTES = 30
+        now = datetime.now(timezone.utc)
         for pos in positions:
+            if pos.last_evaluated_ts:
+                try:
+                    last_eval = datetime.fromisoformat(pos.last_evaluated_ts)
+                    if (now - last_eval) < timedelta(minutes=SKIP_RETRY_MINUTES):
+                        # Recently evaluated. Skip unless the position
+                        # has materially changed.
+                        continue
+                except Exception:
+                    pass
             try:
                 # Fetch current price from CLOB
                 book = await smart_exit.fetch_token_book(pos.token_id)
@@ -397,25 +413,52 @@ class BotRunner:
                 order_id = await smart_exit.place_sell_order(
                     pos.token_id, best_bid, decision.shares_to_sell
                 )
-                if order_id:
-                    self.sm.record_strategy_event(
-                        strategy="smart_exit",
-                        event_title=pos.token_id[:20],
-                        action=decision.decision,
-                        detail={"shares": decision.shares_to_sell,
-                                "price": best_bid,
-                                "pct_change": decision.pct_change,
-                                "reasoning": decision.reasoning},
+                if not order_id:
+                    self.log.warning(f"smart_exit: order placement failed for {pos.token_id[:12]}")
+                    continue
+                # Verify the order actually filled. The CLOB orderbook
+                # is mostly dust at the extremes; limit orders at the
+                # displayed best bid often don't fill. Without this
+                # check, we'd increment today_trade_count and record
+                # the trade even though no shares changed hands.
+                filled = await smart_exit.verify_order_filled(
+                    order_id, pos.token_id, wait_seconds=6.0
+                )
+                if not filled:
+                    self.log.info(
+                        f"smart_exit: order {order_id[:16]} not filled, "
+                        f"cancelling (will retry next tick at lower price)"
                     )
-                    trades.append({
-                        "token_id": pos.token_id,
-                        "side": "SELL",
-                        "price": best_bid,
-                        "size_shares": decision.shares_to_sell,
-                        "order_id": order_id,
-                        "decision": decision.decision,
-                    })
-                    smart_exit.mark_evaluated(self.cfg.state_dir, pos.token_id, decision.decision)
+                    await smart_exit.cancel_order(order_id)
+                    smart_exit.mark_evaluated(
+                        self.cfg.state_dir, pos.token_id,
+                        f"{decision.decision}_unfilled"
+                    )
+                    continue
+                # Order filled: now safe to record as a trade and update
+                # state. (Reordered 2026-06-13: prior to this, the bot
+                # would record an unfilled order as a completed trade
+                # and re-enter on the next tick, leading to position
+                # inflation without real exposure decrease.)
+                self.sm.record_strategy_event(
+                    strategy="smart_exit",
+                    event_title=pos.token_id[:20],
+                    action=decision.decision,
+                    detail={"shares": decision.shares_to_sell,
+                            "price": best_bid,
+                            "pct_change": decision.pct_change,
+                            "reasoning": decision.reasoning,
+                            "order_id": order_id},
+                )
+                trades.append({
+                    "token_id": pos.token_id,
+                    "side": "SELL",
+                    "price": best_bid,
+                    "size_shares": decision.shares_to_sell,
+                    "order_id": order_id,
+                    "decision": decision.decision,
+                })
+                smart_exit.mark_evaluated(self.cfg.state_dir, pos.token_id, decision.decision)
             except Exception as e:
                 self.log.warning(f"smart_exit error for {pos.token_id[:12]}: {e}")
         if trades:
@@ -457,34 +500,46 @@ class BotRunner:
         # once when it exceeds the cap and not repeated until the next
         # time it goes below the cap and then re-exceeds the cap."
         self.sm.update(cap_alert_sent_tick=False)
-        # 1. Try the multi-outcome arb scanner first — it has the highest
-        #    conviction (structural mispricing, no info-edge needed).
+        # 1. Reconcile on-chain exposure FIRST. This is the source of
+        #    truth for the cap check. Without this, new BUY orders can
+        #    be placed before we know the actual exposure.
+        #    (Reordered 2026-06-13: previously reconcile ran at end
+        #    of tick, after arb-scan, so a buy could fire when we were
+        #    already over cap. Bug observed 2026-06-12.)
+        over_cap = False
         try:
-            arb_trades = await self._scan_and_execute_arbs()
-            for trade in arb_trades:
-                self.sm.update(
-                    today_trade_count=self.sm.read().get("today_trade_count", 0) + 1,
-                )
-                self.sm.record_trade(
-                    condition_id=trade.get("token_id", ""),
-                    token_id=trade.get("token_id", ""),
-                    side="BUY",
-                    price=trade.get("price", 0),
-                    size_usd=trade.get("size_usd", 0),
-                    status="OPEN",
-                    order_id=trade.get("order_id", ""),
-                )
-                self.notifier.trade_opened(
-                    market_question=trade.get("event_title", "?") + " — " + trade.get("bucket_title", ""),
-                    side="BUY",
-                    price=trade.get("price", 0),
-                    size_usd=trade.get("size_usd", 0),
-                    order_id=trade.get("order_id", ""),
-                )
+            over_cap = self._reconcile_and_check_cap()
+        except Exception as e:
+            self.log.warning(f"start-of-tick reconcile failed: {type(e).__name__}: {e}")
+        # 2. Try the multi-outcome arb scanner ONLY if we're under cap.
+        arb_trades: list[dict] = []
+        if not over_cap:
+            try:
+                arb_trades = await self._scan_and_execute_arbs()
+                for trade in arb_trades:
+                    self.sm.update(
+                        today_trade_count=self.sm.read().get("today_trade_count", 0) + 1,
+                    )
+                    self.sm.record_trade(
+                        condition_id=trade.get("token_id", ""),
+                        token_id=trade.get("token_id", ""),
+                        side="BUY",
+                        price=trade.get("price", 0),
+                        size_usd=trade.get("size_usd", 0),
+                        status="OPEN",
+                        order_id=trade.get("order_id", ""),
+                    )
+                    self.notifier.trade_opened(
+                        market_question=trade.get("event_title", "?") + " — " + trade.get("bucket_title", ""),
+                        side="BUY",
+                        price=trade.get("price", 0),
+                        size_usd=trade.get("size_usd", 0),
+                        order_id=trade.get("order_id", ""),
+                    )
+            except Exception as e:
+                self.log.warning(f"arb scan failed: {type(e).__name__}: {e}")
             if arb_trades:
                 self.log.info(f"Arb tick: {len(arb_trades)} trades placed")
-        except Exception as e:
-            self.log.warning(f"arb scan failed: {type(e).__name__}: {e}")
         # 2. Smart exit: evaluate directional positions for take-profit / cut-loss
         try:
             exit_trades = await self._run_smart_exit()

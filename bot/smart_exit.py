@@ -285,3 +285,45 @@ async def fetch_token_book(token_id: str) -> dict:
         return result
     except Exception:
         return {"bids": [], "asks": []}
+async def verify_order_filled(order_id: str, token_id: str, *,
+                              wait_seconds: float = 8.0) -> bool:
+    """Check if a CLOB order has filled. Polls for a few seconds.
+
+    Returns True if filled, False if still resting. The bot's caller
+    should NOT count unfilled orders as completed trades.
+    """
+    if not order_id:
+        return False
+    try:
+        import asyncio
+        await asyncio.sleep(wait_seconds)
+        result = await mcp_client.call_tool("get_order", {"order_id": order_id})
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except Exception:
+                return False
+        if not isinstance(result, dict):
+            return False
+        status = result.get("status", "").upper()
+        size_matched = float(result.get("size_matched", 0) or 0)
+        if status in ("MATCHED", "FILLED"):
+            return True
+        if size_matched > 0:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+async def cancel_order(order_id: str) -> bool:
+    """Cancel a CLOB order. Returns True if cancelled successfully."""
+    if not order_id:
+        return False
+    try:
+        result = await mcp_client.call_tool("cancel_order", {"order_id": order_id})
+        return result is not None
+    except Exception:
+        return False
+
+
